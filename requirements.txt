@@ -1,0 +1,8 @@
+timm==0.3.2
+kornia
+pandas
+imageio
+tabulate
+colorama
+
+
