@@ -1,4 +1,4 @@
-# SiT: Self-supervised image Transformer 
+# SiT: Self-supervised vIsion Transformer 
 
 ![](imgs/SiT.png)
 
