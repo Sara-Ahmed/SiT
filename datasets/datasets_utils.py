@@ -36,12 +36,16 @@ def getItem(X, target = None, transform=None, training_mode = 'SSL'):
         if transform is not None:
             X = transform(X)
         return X, target
-        
-    X1, rot1 = RandomRotation(X)
-    X2, rot2 = RandomRotation(X)
 
+    
     if transform is not None:
-        X1 = transform(X1)
-        X2 = transform(X2)
+        X1 = transform(X)
+        X2 = transform(X)
+    else:
+        X1, X2 = X, X
+        
+    X1, rot1 = RandomRotation(X1)
+    X2, rot2 = RandomRotation(X2)
+
     
     return X1, rot1, X2, rot2
