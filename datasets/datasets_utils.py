@@ -9,11 +9,11 @@ def RandomRotation(X, orientation=None):
     if orientation == 0: # do nothing
         pass
     elif orientation == 1:  
-        X = X.transpose(Image.ROTATE_90)
+        X = X.rot90(-1, [1, 2])
     elif orientation == 2:  
-        X = X.transpose(Image.ROTATE_180)
+        X = X.rot90(-1, [1, 2]).rot90(-1, [1, 2])
     elif orientation == 3: 
-        X = X.transpose(Image.ROTATE_270)
+        X = X.rot90(1, [1, 2])
         
     return X, orientation
 
@@ -36,8 +36,7 @@ def getItem(X, target = None, transform=None, training_mode = 'SSL'):
         if transform is not None:
             X = transform(X)
         return X, target
-
-    
+        
     if transform is not None:
         X1 = transform(X)
         X2 = transform(X)
@@ -46,6 +45,5 @@ def getItem(X, target = None, transform=None, training_mode = 'SSL'):
         
     X1, rot1 = RandomRotation(X1)
     X2, rot2 = RandomRotation(X2)
-
     
     return X1, rot1, X2, rot2
