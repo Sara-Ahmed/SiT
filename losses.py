@@ -48,7 +48,7 @@ class LearnedLoss():
         return self.lossF(output, label)
 
     def calculate_weighted_loss(self, loss, _s):
-        return self.adj * torch.exp(-_s) * loss + 0.5 * _s
+        return torch.exp(-_s * self.adj) * loss + 0.5 * _s
     
 class MTLLOSS():
     def __init__(self, loss_funcs, device):
