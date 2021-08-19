@@ -22,7 +22,8 @@ class CIFAR100(datasets.CIFAR100):
     ) -> None:
 
         super(CIFAR100, self).__init__(root, transform=transform,
-                                      target_transform=target_transform)
+                                       download=download,
+                                       target_transform=target_transform)
 
         self.training_mode = training_mode
         
@@ -105,6 +106,7 @@ class CIFAR10(datasets.CIFAR10):
     ) -> None:
 
         super(CIFAR10, self).__init__(root, transform=transform,
+                                      download=download,
                                       target_transform=target_transform)
         
         self.training_mode = training_mode
