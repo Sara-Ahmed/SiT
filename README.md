@@ -4,7 +4,7 @@
 
 This repository contains the official PyTorch self-supervised pretraining, finetuning, and evaluation codes for SiT (Self-supervised image Transformer).
 
-The training strategy is adopted from [Deit](https://github.com/facebookresearch/deit) 
+The finetuning strategy is adopted from [Deit](https://github.com/facebookresearch/deit) 
 
 # Usage
 - Create an environment
