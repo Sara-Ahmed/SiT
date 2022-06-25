@@ -1,6 +1,6 @@
 # SiT: Self-supervised vIsion Transformer 
 
-![](imgs/SiT.png)
+![](imgs/SiT_.png)
 
 This repository contains the official PyTorch self-supervised pretraining, finetuning, and evaluation codes for SiT (Self-supervised image Transformer).
 
