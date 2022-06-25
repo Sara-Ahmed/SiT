@@ -16,11 +16,11 @@ from losses import SimCLR
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 
-from datasets import load_dataset, datasets_utils
+from datasets import prepare_datasets, datasets_utils
 from engine import train_one_epoch
 
 import utils
-import vision_transformer as vits
+import vision_transformer_SiT as vits
 from vision_transformer import RECHead, ContrastiveHead
 
 def get_args_parser():
@@ -95,7 +95,7 @@ def train_SiTv2(args):
 
     ################ Preparing Dataset
     transform = datasets_utils.DataAugmentationSiT(args)    
-    dataset , _ = load_dataset.build_dataset(args, True, trnsfrm=transform, training_mode='SSL')
+    dataset , _ = prepare_datasets.build_dataset(args, True, trnsfrm=transform, training_mode='SSL')
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
     data_loader = torch.utils.data.DataLoader(dataset, sampler=sampler, batch_size=args.batch_size,
         num_workers=args.num_workers, pin_memory=True, drop_last=True)
