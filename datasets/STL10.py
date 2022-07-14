@@ -42,6 +42,7 @@ class STL10(torchvision.datasets.STL10):
             download: bool = False, num_imgs_per_cat = None, training_mode = 'SSL'
     ) -> None:
         super(STL10, self).__init__(root, transform=transform,
+                                    download=download,
                                     target_transform=target_transform)
         
         self.training_mode = training_mode
