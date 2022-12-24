@@ -24,7 +24,7 @@ Self-supervised pre-trained models using SiT can be downloaded from [here](https
 
 **Notes:** 
 1. assign the --dataset_location parameter to the location of the downloaded dataset
-2. Set lambda to high value when pretraining on small datasets, e.g. lambda=5
+2. Set lmbda to high value when pretraining on small datasets, e.g. lmbda=5
 
 If you use this code for a paper, please cite:
 
