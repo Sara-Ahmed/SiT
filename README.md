@@ -22,7 +22,9 @@ The finetuning strategy is adopted from [Deit](https://github.com/facebookresear
 
 Self-supervised pre-trained models using SiT can be downloaded from [here](https://drive.google.com/drive/folders/1b1Yu1r-yaflz8Uu_D9oE6ft5TMwK-wLR?usp=sharing)
 
-**Note: assign the --dataset_location parameter to the location of the downloaded dataset**
+**Notes:** 
+1. assign the --dataset_location parameter to the location of the downloaded dataset
+2. Set lambda to high value when pretraining on small datasets, e.g. lambda=5
 
 If you use this code for a paper, please cite:
 
