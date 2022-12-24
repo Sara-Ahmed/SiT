@@ -1,16 +1,39 @@
-
-"""
-Mostly copy-paste from timm library.
-https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
-"""
 import math
 from functools import partial
 
 import torch
 import torch.nn as nn
 
-from utils import trunc_normal_
-from itertools import repeat
+import warnings
+
+def _no_grad_trunc_normal_(tensor, mean, std, a, b):
+    def norm_cdf(x):
+        return (1. + math.erf(x / math.sqrt(2.))) / 2.
+
+    if (mean < a - 2 * std) or (mean > b + 2 * std):
+        warnings.warn("mean is more than 2 std from [a, b] in nn.init.trunc_normal_. "
+                      "The distribution of values may be incorrect.",
+                      stacklevel=2)
+
+    with torch.no_grad():
+        l = norm_cdf((a - mean) / std)
+        u = norm_cdf((b - mean) / std)
+
+        tensor.uniform_(2 * l - 1, 2 * u - 1)
+
+        tensor.erfinv_()
+
+        tensor.mul_(std * math.sqrt(2.))
+        tensor.add_(mean)
+
+        tensor.clamp_(min=a, max=b)
+        return tensor
+
+
+def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
+    return _no_grad_trunc_normal_(tensor, mean, std, a, b)
+
+
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
@@ -24,8 +47,6 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
 
 
 class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
-    """
     def __init__(self, drop_prob=None):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
@@ -94,19 +115,14 @@ class Block(nn.Module):
 
     def forward(self, x, return_attention=False):
         y, attn = self.attn(self.norm1(x))
-        
+        if return_attention:
+            return attn
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        
-        if return_attention:
-            return x, attn
-        
         return x
 
 
 class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding
-    """
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
         num_patches = (img_size // patch_size) * (img_size // patch_size)
@@ -123,45 +139,34 @@ class PatchEmbed(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    """ Vision Transformer """
     def __init__(self, img_size=[224], patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0.1, norm_layer=nn.LayerNorm, headData=True, headClass=True, **kwargs):
+                 drop_path_rate=0., norm_layer=nn.LayerNorm, **kwargs):
         super().__init__()
-        
-        
-        
-        
         self.num_features = self.embed_dim = embed_dim
 
         self.patch_embed = PatchEmbed(
             img_size=img_size[0], patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
-        self.cls_token1 = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.cls_token2 = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 2, embed_dim))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
             for i in range(depth)])
-        
-        
         self.norm = norm_layer(embed_dim)
 
         # Classifier head
-        self.head_class_rot = nn.Linear(embed_dim, num_classes) if (num_classes > 0 and headClass==True) else nn.Identity()
-        self.head_class_contr = nn.Linear(embed_dim, num_classes) if (num_classes > 0 and headClass==True) else nn.Identity()
-        self.head_data = nn.Sequential(nn.Linear(embed_dim, mlp_ratio*embed_dim), nn.GELU(), 
-                                  nn.Linear(embed_dim*mlp_ratio, num_classes)) if (num_classes > 0 and headData==True) else nn.Identity()
+        self.head = nn.Sequential(*[nn.Linear(2*embed_dim, embed_dim), nn.GELU(), nn.Linear(embed_dim, num_classes)]) if num_classes > 0 else nn.Identity()
+
 
         trunc_normal_(self.pos_embed, std=.02)
-        trunc_normal_(self.cls_token1, std=.02)
-        trunc_normal_(self.cls_token2, std=.02)
+        trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -173,14 +178,13 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    # from [https://github.com/facebookresearch/dino/issues/8]
     def interpolate_pos_encoding(self, x, w, h):
-        npatch = x.shape[1] - 2
-        N = self.pos_embed.shape[1] - 2
+        npatch = x.shape[1] - 1
+        N = self.pos_embed.shape[1] - 1
         if npatch == N and w == h:
             return self.pos_embed
-        class_pos_embed = self.pos_embed[:, 0:2]
-        patch_pos_embed = self.pos_embed[:, 2:]
+        class_pos_embed = self.pos_embed[:, 0]
+        patch_pos_embed = self.pos_embed[:, 1:]
         dim = x.shape[-1]
         w0 = w // self.patch_embed.patch_size
         h0 = h // self.patch_embed.patch_size
@@ -192,57 +196,31 @@ class VisionTransformer(nn.Module):
         )
         assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        return torch.cat((class_pos_embed, patch_pos_embed), dim=1)
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
     def prepare_tokens(self, x):
         B, nc, w, h = x.shape
-        x = self.patch_embed(x)  # patch linear embedding
+        x = self.patch_embed(x)  
 
-        # add the [CLS] token to the embed patch tokens
-        cls_tokens1 = self.cls_token1.expand(B, -1, -1)
-        cls_tokens2 = self.cls_token2.expand(B, -1, -1)
-        x = torch.cat((cls_tokens1, cls_tokens2, x), dim=1)
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
 
-        # add positional encoding to each token
         x = x + self.interpolate_pos_encoding(x, w, h)
 
         return self.pos_drop(x)
 
     def forward(self, x, classify=False):
-        
         x = self.prepare_tokens(x)
-         
-        for i, blk in enumerate(self.blocks):
+        for blk in self.blocks:
             x = blk(x)
-
+            
         x = self.norm(x)
         
-        if classify:
-            return self.head_class_rot(x[:, 0]), self.head_class_contr(x[:, 1]), self.head_data(torch.mean(x[:, 2:], dim=1))
+        if classify==True:
+            return self.head( torch.cat( (x[:, 0], torch.mean(x[:, 1:], dim=1)), dim=1 ) )   
 
         return x
 
-    def get_last_features_attentions(self, x):
-        x = self.prepare_tokens(x)
-        for i, blk in enumerate(self.blocks):
-            
-            if i == (len(self.blocks)-1):
-                x, attn = blk(x, return_attention=True)
-                return self.norm(x), attn
-            
-            else:
-                x = blk(x)
-                
-    def get_all_features_attentions(self, x):
-        x = self.prepare_tokens(x)
-        
-        attn = []
-        for i, blk in enumerate(self.blocks):
-            
-            x, attn_ = blk(x, return_attention=True)
-            attn.append(attn_)
-            
-        return attn
 
 def vit_tiny(patch_size=16, **kwargs):
     model = VisionTransformer(
@@ -251,9 +229,9 @@ def vit_tiny(patch_size=16, **kwargs):
     return model
 
 
-def vit_small(patch_size=16, img_size=[224], applyReconstruction=False, **kwargs):
+def vit_small(patch_size=16, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, img_size=img_size, applyReconstruction=applyReconstruction, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
+        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
@@ -264,24 +242,26 @@ def vit_base(patch_size=16, **kwargs):
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
-    
-class ContrastiveHead(nn.Module):
-    def __init__(self, input_dim, output_dim, nlayers=3, hidden_dim=2048):
+
+class CLSHead(nn.Module):
+    def __init__(self, in_dim, bottleneck_dim, nlayers=3, hidden_dim=4096):
         super().__init__()
-
-        mlp = []
-        for l in range(nlayers):
-            dim1 = input_dim if l == 0 else hidden_dim
-            dim2 = output_dim if l == nlayers - 1 else hidden_dim
-
-            mlp.append(nn.Linear(dim1, dim2, bias=False))
-
-            if l < nlayers - 1:
-                mlp.append(nn.GELU())
-
-        self.mlp = nn.Sequential(*mlp)
+        nlayers = max(nlayers, 1)
+        if nlayers == 1:
+            self.mlp = nn.Linear(in_dim, bottleneck_dim)
+        else:
+            layers = [nn.Linear(in_dim, hidden_dim)]
+            layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            for _ in range(nlayers - 2):
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+                layers.append(nn.BatchNorm1d(hidden_dim))
+                layers.append(nn.GELU())
+            layers.append(nn.Linear(hidden_dim, bottleneck_dim))
+            layers.append(nn.BatchNorm1d(bottleneck_dim, affine=False))
+            
+            self.mlp = nn.Sequential(*layers)
         self.apply(self._init_weights)
-
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -293,6 +273,8 @@ class ContrastiveHead(nn.Module):
         x = self.mlp(x)
         return x
 
+
+
 class RECHead(nn.Module):
     def __init__(self, in_dim, in_chans=3, patch_size=16):
         super().__init__()
@@ -301,11 +283,13 @@ class RECHead(nn.Module):
         layers.append(nn.GELU())
         layers.append(nn.Linear(in_dim, in_dim))
         layers.append(nn.GELU())
+        layers.append(nn.Linear(in_dim, in_dim))
+        layers.append(nn.GELU())
 
         self.mlp = nn.Sequential(*layers)
         self.apply(self._init_weights)
-
-        self.convTrans = nn.ConvTranspose2d(in_dim, in_chans, kernel_size=(patch_size, patch_size),
+        
+        self.convTrans = nn.ConvTranspose2d(in_dim, in_chans, kernel_size=(patch_size, patch_size), 
                                                 stride=(patch_size, patch_size))
 
 
@@ -317,11 +301,10 @@ class RECHead(nn.Module):
 
     def forward(self, x):
         x = self.mlp(x)
-
+        
         x_rec = x.transpose(1, 2)
         out_sz = tuple( (  int(math.sqrt(x_rec.size()[2]))  ,   int(math.sqrt(x_rec.size()[2])) ) )
         x_rec = self.convTrans(x_rec.unflatten(2, out_sz))
-
-
+                
+                
         return x_rec
-
