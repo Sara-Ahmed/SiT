@@ -1,18 +1,111 @@
 # Copyright (c) 2015-present, Facebook, Inc.
 # All rights reserved.
 """
-Misc functions, including distributed helpers.
+Misc functions.
 
-Mostly copy-paste from torchvision references.
+Mostly copy-paste from torchvision references or other public repos like DEIT 
+
 """
-import io
 import os
+import sys
 import time
-from collections import defaultdict, deque
 import datetime
+import subprocess
+from collections import defaultdict, deque
 
+import numpy as np
 import torch
+from torch import nn
 import torch.distributed as dist
+
+
+import argparse
+
+def clip_gradients(model, clip):
+    norms = []
+    for name, p in model.named_parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            norms.append(param_norm.item())
+            clip_coef = clip / (param_norm + 1e-6)
+            if clip_coef < 1:
+                p.grad.data.mul_(clip_coef)
+    return norms
+
+
+def cancel_gradients_last_layer(epoch, model, freeze_last_layer):
+    if epoch >= freeze_last_layer:
+        return
+    for n, p in model.named_parameters():
+        if "last_layer" in n:
+            p.grad = None
+
+
+def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
+    """
+    Re-start from checkpoint
+    """
+    if not os.path.isfile(ckp_path):
+        return
+    print("Found checkpoint at {}".format(ckp_path))
+
+    checkpoint = torch.load(ckp_path, map_location="cpu")
+    for key, value in kwargs.items():
+        if key in checkpoint and value is not None:
+            try:
+                msg = value.load_state_dict(checkpoint[key], strict=False)
+                print("=> loaded '{}' from checkpoint '{}' with msg {}".format(key, ckp_path, msg))
+            except TypeError:
+                try:
+                    msg = value.load_state_dict(checkpoint[key])
+                    print("=> loaded '{}' from checkpoint: '{}'".format(key, ckp_path))
+                except ValueError:
+                    print("=> failed to load '{}' from checkpoint: '{}'".format(key, ckp_path))
+        else:
+            print("=> key '{}' not found in checkpoint: '{}'".format(key, ckp_path))
+
+    # re load variable important for the run
+    if run_variables is not None:
+        for var_name in run_variables:
+            if var_name in checkpoint:
+                run_variables[var_name] = checkpoint[var_name]
+
+
+def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
+
+    schedule = np.concatenate((warmup_schedule, schedule))
+    assert len(schedule) == epochs * niter_per_ep
+    return schedule
+
+
+def bool_flag(s):
+    """
+    Parse boolean arguments from the command line.
+    """
+    FALSY_STRINGS = {"off", "false", "0"}
+    TRUTHY_STRINGS = {"on", "true", "1"}
+    if s.lower() in FALSY_STRINGS:
+        return False
+    elif s.lower() in TRUTHY_STRINGS:
+        return True
+    else:
+        raise argparse.ArgumentTypeError("invalid value for a boolean flag")
+
+
+def fix_random_seeds(seed=31):
+    """
+    Fix random seeds.
+    """
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
 
 
 class SmoothedValue(object):
@@ -22,7 +115,7 @@ class SmoothedValue(object):
 
     def __init__(self, window_size=20, fmt=None):
         if fmt is None:
-            fmt = "{median:.4f} ({global_avg:.4f})"
+            fmt = "{median:.6f} ({global_avg:.6f})"
         self.deque = deque(maxlen=window_size)
         self.total = 0.0
         self.count = 0
@@ -77,6 +170,33 @@ class SmoothedValue(object):
             value=self.value)
 
 
+def reduce_dict(input_dict, average=True):
+    """
+    Args:
+        input_dict (dict): all the values will be reduced
+        average (bool): whether to do average or sum
+    Reduce the values in the dictionary from all processes so that all processes
+    have the averaged results. Returns a dict with the same fields as
+    input_dict, after reduction.
+    """
+    world_size = get_world_size()
+    if world_size < 2:
+        return input_dict
+    with torch.no_grad():
+        names = []
+        values = []
+        # sort the keys so that they are consistent across processes
+        for k in sorted(input_dict.keys()):
+            names.append(k)
+            values.append(input_dict[k])
+        values = torch.stack(values, dim=0)
+        dist.all_reduce(values)
+        if average:
+            values /= world_size
+        reduced_dict = {k: v for k, v in zip(names, values)}
+    return reduced_dict
+
+
 class MetricLogger(object):
     def __init__(self, delimiter="\t"):
         self.meters = defaultdict(SmoothedValue)
@@ -118,20 +238,28 @@ class MetricLogger(object):
             header = ''
         start_time = time.time()
         end = time.time()
-        iter_time = SmoothedValue(fmt='{avg:.4f}')
-        data_time = SmoothedValue(fmt='{avg:.4f}')
+        iter_time = SmoothedValue(fmt='{avg:.6f}')
+        data_time = SmoothedValue(fmt='{avg:.6f}')
         space_fmt = ':' + str(len(str(len(iterable)))) + 'd'
-        log_msg = [
-            header,
-            '[{0' + space_fmt + '}/{1}]',
-            'eta: {eta}',
-            '{meters}',
-            'time: {time}',
-            'data: {data}'
-        ]
         if torch.cuda.is_available():
-            log_msg.append('max mem: {memory:.0f}')
-        log_msg = self.delimiter.join(log_msg)
+            log_msg = self.delimiter.join([
+                header,
+                '[{0' + space_fmt + '}/{1}]',
+                'eta: {eta}',
+                '{meters}',
+                'time: {time}',
+                'data: {data}',
+                'max mem: {memory:.0f}'
+            ])
+        else:
+            log_msg = self.delimiter.join([
+                header,
+                '[{0' + space_fmt + '}/{1}]',
+                'eta: {eta}',
+                '{meters}',
+                'time: {time}',
+                'data: {data}'
+            ])
         MB = 1024.0 * 1024.0
         for obj in iterable:
             data_time.update(time.time() - end)
@@ -155,33 +283,28 @@ class MetricLogger(object):
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(
+        print('{} Total time: {} ({:.6f} s / it)'.format(
             header, total_time_str, total_time / len(iterable)))
 
 
-def _load_checkpoint_for_ema(model_ema, checkpoint):
-    """
-    Workaround for ModelEma._load_checkpoint to accept an already-loaded object
-    """
-    mem_file = io.BytesIO()
-    torch.save(checkpoint, mem_file)
-    mem_file.seek(0)
-    model_ema._load_checkpoint(mem_file)
+def get_sha():
+    cwd = os.path.dirname(os.path.abspath(__file__))
 
-
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    import builtins as __builtin__
-    builtin_print = __builtin__.print
-
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
-
-    __builtin__.print = print
+    def _run(command):
+        return subprocess.check_output(command, cwd=cwd).decode('ascii').strip()
+    sha = 'N/A'
+    diff = "clean"
+    branch = 'N/A'
+    try:
+        sha = _run(['git', 'rev-parse', 'HEAD'])
+        subprocess.check_output(['git', 'diff'], cwd=cwd)
+        diff = _run(['git', 'diff-index', 'HEAD'])
+        diff = "has uncommited changes" if diff else "clean"
+        branch = _run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])
+    except Exception:
+        pass
+    message = f"sha: {sha}, status: {diff}, branch: {branch}"
+    return message
 
 
 def is_dist_avail_and_initialized():
@@ -213,48 +336,88 @@ def save_on_master(*args, **kwargs):
         torch.save(*args, **kwargs)
 
 
+def setup_for_distributed(is_master):
+    """
+    This function disables printing when not in master process
+    """
+    import builtins as __builtin__
+    builtin_print = __builtin__.print
+
+    def print(*args, **kwargs):
+        force = kwargs.pop('force', False)
+        if is_master or force:
+            builtin_print(*args, **kwargs)
+
+    __builtin__.print = print
+
 def init_distributed_mode(args):
+    # launched with torch.distributed.launch
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
         args.gpu = int(os.environ['LOCAL_RANK'])
+    # launched with submitit on a slurm cluster
     elif 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
         args.gpu = args.rank % torch.cuda.device_count()
+    # launched naively with `python main_dino.py`
+    # we manually add MASTER_ADDR and MASTER_PORT to env variables
+    elif torch.cuda.is_available():
+        print('Will run the code on one GPU.')
+        args.rank, args.gpu, args.world_size = 0, 0, 1
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = '29500'
     else:
-        print('Not using distributed mode')
-        args.distributed = False
-        return
+        print('Does not support training without GPU.')
+        sys.exit(1)
 
     args.distributed = True
+    dist.init_process_group(
+        backend="nccl",
+        init_method=args.dist_url,
+        world_size=args.world_size,
+        rank=args.rank,
+    )
 
     torch.cuda.set_device(args.gpu)
-    args.dist_backend = 'nccl'
     print('| distributed init (rank {}): {}'.format(
         args.rank, args.dist_url), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
-    torch.distributed.barrier()
+    dist.barrier()
     setup_for_distributed(args.rank == 0)
 
+def accuracy(output, target, topk=(1,)):
+    maxk = max(topk)
+    batch_size = target.size(0)
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+    return [correct[:k].reshape(-1).float().sum(0) * 100. / batch_size for k in topk]
 
-def print_args(args):
-    
-    print('***********************************************')
-    print('*', ' '.ljust(9), 'Training Mode is ', args.training_mode.ljust(15), '*')
-    print('***********************************************')
-    print('Dataset Name: ', args.data_set)
-    print('Dataset will be downloaded/loaded from: ', args.dataset_location)
-    print('---------- Model ----------')
-    print('Model name: ', args.model)
-    print('Finetune From: ', args.finetune)
-    print('Resume From: ', args.resume)
-    print('Output To: ', args.output_dir)
-    print('Number of GPUs: ', args.world_size)
-    if args.SiT_LinearEvaluation:
-        print('NOTE: The backbone is freezed, only last classifier is trainable!')
-    print('---------- Optimizer ----------')
-    print('Learning Rate: ', args.lr)
-    print('Weight Decay: ', args.weight_decay)
-    print('Batchsize: ', args.batch_size)
-    
+def get_params_groups(model):
+    regularized = []
+    not_regularized = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # we do not regularize biases nor Norm parameters
+        if name.endswith(".bias") or len(param.shape) == 1:
+            not_regularized.append(param)
+        else:
+            regularized.append(param)
+    return [{'params': regularized}, {'params': not_regularized, 'weight_decay': 0.}]
+
+def multi_scale(samples, model):
+    v = None
+    for s in [1, 1/2**(1/2), 1/2]:  # we use 3 different scales
+        if s == 1:
+            inp = samples.clone()
+        else:
+            inp = nn.functional.interpolate(samples, scale_factor=s, mode='bilinear', align_corners=False)
+        feats = model(inp).clone()
+        if v is None:
+            v = feats
+        else:
+            v += feats
+    v /= 3
+    v /= v.norm()
+    return v
