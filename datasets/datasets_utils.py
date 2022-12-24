@@ -1,23 +1,12 @@
 from PIL import Image
 import numpy as np
-
-import os
-import sys
-import time
-import math
 import random
-import datetime
-import subprocess
-from collections import defaultdict, deque
 
 from numpy.random import randint
-import io
 import torch
-from torch import nn
-import torch.distributed as dist
-from PIL import ImageFilter, ImageOps, Image
+
+from PIL import ImageFilter, ImageOps
 from torchvision import transforms as tf
-from typing import Optional, Tuple
 
 from torchvision import transforms
 
@@ -77,7 +66,7 @@ class GaussianBlur(object):
                 radius=random.uniform(self.radius_min, self.radius_max)
             )
         )
-    
+
 
 class Solarization(object):
     """
@@ -91,31 +80,22 @@ class Solarization(object):
             return ImageOps.solarize(img)
         else:
             return img
-        
-        
+
 def GMML_replace_list(samples, corrup_prev, masks_prev, drop_type='noise', max_replace=0.35, align=16):
-    if not isinstance(samples, list):
-        samples = [samples]
         
     rep_drop = 1 if drop_type == '' else ( 1 / ( len(drop_type.split('-')) + 1 ) )
     
-    n_imgs = samples[0].size()[0] #this is batch size, but in case bad inistance happened while loading
-    masks_all = []
-    aug_all = []
-    for si, s in enumerate(samples):
-        samples_aug = s.detach().clone()
-        masks = torch.zeros_like(samples_aug)
-        for i in range(n_imgs):
-            idx_rnd = randint(0, n_imgs)
-            if random.random() < rep_drop: 
-                samples_aug[i], masks[i] = GMML_drop_rand_patches(samples_aug[i], samples[si][idx_rnd], max_replace=max_replace, align=align)
-            else:
-                samples_aug[i], masks[i] = corrup_prev[si][i], masks_prev[si][i]
-        #samples[si] = samples_aug
-        masks_all.append(masks)
-        aug_all.append(samples_aug)
-      
-    return aug_all, masks_all
+    n_imgs = samples.size()[0] #this is batch size, but in case bad inistance happened while loading
+    samples_aug = samples.detach().clone()
+    masks = torch.zeros_like(samples_aug)
+    for i in range(n_imgs):
+        idx_rnd = randint(0, n_imgs)
+        if random.random() < rep_drop: 
+            samples_aug[i], masks[i] = GMML_drop_rand_patches(samples_aug[i], samples[idx_rnd], max_replace=max_replace, align=align)
+        else:
+            samples_aug[i], masks[i] = corrup_prev[i], masks_prev[i]
+
+    return samples_aug, masks
 
 def GMML_drop_rand_patches(X, X_rep=None, drop_type='noise', max_replace=0.7, align=16, max_block_sz=0.3):
     #######################
@@ -165,7 +145,6 @@ def GMML_drop_rand_patches(X, X_rep=None, drop_type='noise', max_replace=0.7, al
     return X, mask
 
 
-
 class DataAugmentationSiT(object):
     def __init__(self, args):
         
@@ -173,66 +152,66 @@ class DataAugmentationSiT(object):
         self.drop_perc = args.drop_perc
         self.drop_type = args.drop_type
         self.drop_align = args.drop_align
-
-        self.color_jitter1 = transforms.Compose([
+        
+        
+        flip_and_color_jitter = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.01)], p=0.3)])
-
-        self.color_jitter2 = transforms.Compose([
-            transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)], p=0.8),
-            transforms.RandomGrayscale(p=0.2)])
-
+                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
+                p=0.8
+            ),
+            transforms.RandomGrayscale(p=0.2),
+        ])
         normalize = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
 
-        # crop 1
-        self.transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(args.img_size, scale=(0.2, 1), interpolation=Image.BICUBIC),
-            transforms.RandomHorizontalFlip(p=0.5),
-            self.color_jitter1,
-            GaussianBlur(0.1),
-            normalize])
-
-        # crop 2
-        self.transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(args.img_size, scale=(0.2, 1), interpolation=Image.BICUBIC),
-            transforms.RandomHorizontalFlip(p=0.5),
-            self.color_jitter2,
+        # first global crop
+        self.global_transfo1 = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=(0.2, 1.), interpolation=Image.BICUBIC),
+            flip_and_color_jitter,
             GaussianBlur(1.0),
+            normalize,
+        ])
+        # second global crop
+        self.global_transfo2 = transforms.Compose([
+            transforms.RandomResizedCrop(224, scale=(0.2, 1.), interpolation=Image.BICUBIC),
+            flip_and_color_jitter,
+            GaussianBlur(0.1),
             Solarization(0.2),
-            normalize])
-        
+            normalize,
+        ])
 
-    def rand_rotate(self, im):
-        rotate = np.random.choice([0., 90., 180., 270.])
-        return tf.functional.rotate(im, rotate), rotate//90
-        
     def __call__(self, image):
-
-        ########## view 1
-        # augmented 
-        im1 = self.transfo1(image)
-        im1, rot1 = self.rand_rotate(im1)
         
-        # corrupted 
-        if self.drop_perc > 0:
-            im_corr1, im_mask1 = GMML_drop_rand_patches(im1.detach().clone(), max_replace=self.drop_perc, drop_type=self.drop_type, align=self.drop_align)
-        else:
-            im_corr1, im_mask1 = im1, torch.zeros_like(im1)
+        clean_crops = []
+        corrupted_crops = []
+        masks_crops = []
 
-        ########## view 2
-        # augmented 
-        im2 = self.transfo2(image)
-        im2, rot2 = self.rand_rotate(im2)
+        ## augmented 1
+        im_orig = self.global_transfo1(image)
         
-        # corrupted 
+        im_corrupted = im_orig.detach().clone()
+        im_mask = torch.zeros_like(im_corrupted)
         if self.drop_perc > 0:
-            im_corr2, im_mask2 = GMML_drop_rand_patches(im2.detach().clone(), max_replace=self.drop_perc, drop_type=self.drop_type, align=self.drop_align)
-        else:
-            im_corr2, im_mask2 = im2, torch.zeros_like(im2)
-
-
-        return [im1, im2], [rot1, rot2], [im_corr1, im_corr2], [im_mask1, im_mask2]
+            im_corrupted, im_mask = GMML_drop_rand_patches(im_corrupted, 
+                                                           max_replace=self.drop_perc, drop_type=self.drop_type, align=self.drop_align)
+        clean_crops.append(im_orig)
+        corrupted_crops.append(im_corrupted)
+        masks_crops.append(im_mask)
+        
+        ## augmented 2
+        im_orig = self.global_transfo2(image)
+        
+        im_corrupted = im_orig.detach().clone()
+        im_mask = torch.zeros_like(im_corrupted)
+        if self.drop_perc > 0:
+            im_corrupted, im_mask = GMML_drop_rand_patches(im_corrupted, 
+                                                           max_replace=self.drop_perc, drop_type=self.drop_type, align=self.drop_align)
+        clean_crops.append(im_orig)
+        corrupted_crops.append(im_corrupted)
+        masks_crops.append(im_mask)
+        
+        return clean_crops, corrupted_crops, masks_crops
 
