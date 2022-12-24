@@ -20,7 +20,7 @@ The finetuning strategy is adopted from [Deit](https://github.com/facebookresear
 # Self-supervised pre-training
 > python -m torch.distributed.launch --nproc_per_node=4 --use_env main.py --batch_size 64 --epochs 801 --data-set 'ImageNet' --output_dir 'checkpoints/SSL/ImageNet'
 
-Self-supervised pre-trained models using SiT can be downloaded from [here](https://drive.google.com/drive/folders/1b1Yu1r-yaflz8Uu_D9oE6ft5TMwK-wLR?usp=sharing)
+Self-supervised pre-trained models using SiT can be downloaded from [here](https://drive.google.com/drive/folders/11lGoNZKcMr6A959Yun_MrSlT3j6h-4YI?usp=share_link)
 
 **Notes:** 
 1. assign the --dataset_location parameter to the location of the downloaded dataset
